@@ -3,11 +3,40 @@
 (() => {
   const ROOT_ID = 'st-audio-player-root'
   const STYLE_ID = 'st-audio-player-style'
+  const LEGACY_ROOT_ID = 'wanjia-generic-audio-player'
+  const LEGACY_STYLE_ID = 'wanjia-generic-audio-player-style'
+  const GLOBAL_INSTANCE_KEY = '__ST_AUDIO_PLAYER_SINGLETON__'
 
   const parentWindow = window.parent && window.parent !== window ? window.parent : window
   const parentDoc = parentWindow && parentWindow.document ? parentWindow.document : null
   if (!parentDoc) return
-  if (parentDoc.getElementById(ROOT_ID)) return
+
+  const removeById = (id) => {
+    const el = parentDoc.getElementById(id)
+    if (el && el.parentNode) {
+      el.parentNode.removeChild(el)
+    }
+  }
+
+  const ownerId = (() => {
+    try {
+      if (typeof window.getScriptId === 'function') return String(window.getScriptId())
+    } catch (_) {}
+    return `script-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  })()
+
+  try {
+    const oldInstance = parentWindow[GLOBAL_INSTANCE_KEY]
+    if (oldInstance && typeof oldInstance.destroy === 'function') {
+      oldInstance.destroy('replaced')
+    }
+  } catch (_) {}
+
+  // 清理历史版本或异常残留节点，避免重复播放器叠加
+  removeById(LEGACY_ROOT_ID)
+  removeById(LEGACY_STYLE_ID)
+  removeById(ROOT_ID)
+  removeById(STYLE_ID)
 
   const clamp = (n, min, max) => Math.max(min, Math.min(max, n))
   const toNumber = (v, d = 0) => {
@@ -293,6 +322,8 @@
   let dragging = false
   let isPlaying = false
   let progressTimer = null
+  let refreshTimer = null
+  let destroyed = false
 
   const renderPlaylistOptions = () => {
     els.playlist.innerHTML = ''
@@ -320,6 +351,7 @@
   }
 
   const switchTrack = async (index, opts = {}) => {
+    if (destroyed) return
     const shouldPlay = opts.play === true
     const track = config.playlist[index]
     if (!track || !track.url) return
@@ -377,6 +409,7 @@
   }
 
   const refreshConfig = () => {
+    if (destroyed) return
     const next = buildConfig()
     const oldLen = config.playlist.length
     config = next
@@ -404,17 +437,40 @@
   }
 
   const teardown = () => {
+    if (destroyed) return
+    destroyed = true
     if (progressTimer) {
       clearInterval(progressTimer)
       progressTimer = null
     }
+    if (refreshTimer) {
+      clearInterval(refreshTimer)
+      refreshTimer = null
+    }
+    window.removeEventListener('pagehide', teardown)
+    window.removeEventListener('beforeunload', teardown)
+    window.removeEventListener('unload', teardown)
     audio.pause()
     audio.src = ''
     if (root.parentNode) root.parentNode.removeChild(root)
     if (style.parentNode) style.parentNode.removeChild(style)
+    try {
+      const current = parentWindow[GLOBAL_INSTANCE_KEY]
+      if (current && current.ownerId === ownerId) {
+        delete parentWindow[GLOBAL_INSTANCE_KEY]
+      }
+    } catch (_) {}
   }
 
   els.close.addEventListener('click', teardown)
+  window.addEventListener('pagehide', teardown)
+  window.addEventListener('beforeunload', teardown)
+  window.addEventListener('unload', teardown)
+  parentWindow[GLOBAL_INSTANCE_KEY] = {
+    ownerId,
+    destroy: teardown,
+    createdAt: Date.now(),
+  }
 
   els.toggle.addEventListener('click', async () => {
     if (!config.playlist.length) return
@@ -516,7 +572,7 @@
   }
 
   // 允许外部更新 scripts.data 后动态生效
-  setInterval(() => {
+  refreshTimer = setInterval(() => {
     try {
       refreshConfig()
     } catch (_) {}
